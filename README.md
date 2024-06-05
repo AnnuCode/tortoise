@@ -15,7 +15,7 @@ An interactive TUI app to manage tasks. It renders tasks according to the approa
     docker run -p 6379:6379 --ulimit memlock=-1 docker.dragonflydb.io/dragonflydb/dragonfly
     ```
 
-2. Run the app: 
+2. Run the App: 
 ```go
 go run .
 ```
