@@ -87,9 +87,15 @@ func (c column) View() string {
 }
 
 func (c *column) DeleteCurrent() tea.Cmd {
+	var task Task
+	var ok bool
+	if task, ok = c.list.SelectedItem().(Task); !ok {
+		return nil
+	}
 	if len(c.list.VisibleItems()) > 0 {
 		c.list.RemoveItem(c.list.Index())
 	}
+	RemoveTask(task)
 
 	var cmd tea.Cmd
 	c.list, cmd = c.list.Update(nil)
