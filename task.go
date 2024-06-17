@@ -5,6 +5,7 @@ type Task struct {
 	Tasktitle       string
 	Taskdescription string
 	Taskdeadline    string
+	Taskid          int
 }
 
 func NewTask(status status, title, description, deadline string) Task {

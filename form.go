@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/gob"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -16,12 +17,13 @@ import (
 )
 
 type Form struct {
-	help        help.Model
-	title       textinput.Model
-	description textarea.Model
-	deadline    textarea.Model
-	col         column
-	index       int
+	help         help.Model
+	title        textinput.Model
+	description  textarea.Model
+	deadline     textarea.Model
+	col          column
+	index        int
+	originalTask Task // Store the original task for comparison
 }
 
 func newDefaultForm() *Form {
@@ -42,9 +44,26 @@ func NewForm(title, description, deadline string) *Form {
 	return &form
 }
 
+var nextTaskID int
+
+func latestTaskID() (int, error) {
+	// Get the current value of the task ID counter from Redis
+	taskIDStr, err := client.Get(ctx, "taskIDCounter").Result()
+	if err != nil {
+		return 0, err
+	}
+
+	// Convert the task ID string to an integer
+	lastTaskID, err := strconv.Atoi(taskIDStr)
+	if err != nil {
+		return 0, err
+	}
+	return lastTaskID, nil
+}
+
 func (f Form) CreateTask() Task {
 
-	return Task{f.col.status, f.title.Value(), f.description.Value(), f.deadline.Value()}
+	return Task{f.col.status, f.title.Value(), f.description.Value(), f.deadline.Value(), nextTaskID}
 }
 
 func (f Form) Init() tea.Cmd {
@@ -79,19 +98,62 @@ func (f Form) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if err != nil {
 				fmt.Println("Error parsing deadline:", err)
 			}
-			var buffer bytes.Buffer
-			encoder := gob.NewEncoder(&buffer)
-			if err := encoder.Encode(Task{Tasktitle: f.title.Value(), Taskdescription: f.description.Value(), Taskstatus: f.col.status, Taskdeadline: f.deadline.Value()}); err != nil {
-				fmt.Printf("Error encoding custom type: %v", err)
-			}
 
-			err = client.ZAdd(ctx, "tasks", redis.Z{Score: float64(dl.Unix()), Member: buffer.Bytes()}).Err()
-			if err != nil {
-				fmt.Println("Error adding task:", err)
+			if f.index != APPEND {
+				editedTask := Task{
+					Taskid:          f.originalTask.Taskid,
+					Tasktitle:       f.title.Value(),
+					Taskdescription: f.description.Value(),
+					Taskdeadline:    f.deadline.Value(),
+					Taskstatus:      f.originalTask.Taskstatus,
+				}
+
+				if editedTask != f.originalTask {
+					RemoveTask(f.originalTask) // Remove the old task
+
+					AddTask(editedTask) // Add the new task
+					// f.col.list.SetItem(f.index, editedTask)
+				}
 			} else {
+				id, err := latestTaskID()
+				if err == nil {
+					nextTaskID = id + 1
+				} else {
+					nextTaskID++
+				}
+
+				// Create the new task
+				newTask := Task{
+					Taskid:          nextTaskID,
+					Tasktitle:       f.title.Value(),
+					Taskdescription: f.description.Value(),
+					Taskstatus:      f.col.status,
+					Taskdeadline:    f.deadline.Value(),
+				}
+
+				var buffer bytes.Buffer
+				encoder := gob.NewEncoder(&buffer)
+				if err := encoder.Encode(newTask); err != nil {
+					fmt.Printf("Error encoding custom type: %v", err)
+				}
+
+				// Using a pipeline to perform multiple operations
+				_, err = client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+					hashKey := fmt.Sprintf("task:%d", newTask.Taskid)
+					pipe.HSet(ctx, "tasks", hashKey, buffer.Bytes())
+					pipe.ZAdd(ctx, "tasks:sorted", redis.Z{Score: float64(dl.Unix()), Member: hashKey})
+					return nil
+				})
+				if err != nil {
+					fmt.Println("Error executing Redis pipeline:", err)
+					return f, nil
+				}
+				_, err = client.Incr(ctx, "taskIDCounter").Result()
+				if err != nil {
+					fmt.Println("error incrementing the counter")
+				}
 				fmt.Println("Task added successfully!")
 			}
-			// Return the completed form as a message.
 			return board.Update(f)
 		}
 	}

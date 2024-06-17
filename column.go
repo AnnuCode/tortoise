@@ -65,6 +65,7 @@ func (c column) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				f := NewForm(task.Tasktitle, task.Taskdescription, task.Taskdeadline)
 				f.index = c.list.Index()
 				f.col = c
+				f.originalTask = task // Save the original task for comparison
 				return f.Update(nil)
 			}
 		case key.Matches(msg, keys.New):
@@ -160,22 +161,25 @@ func (c *column) MoveToNext() tea.Cmd {
 }
 
 func RemoveTask(task Task) {
-	var buffer bytes.Buffer
-	encoder := gob.NewEncoder(&buffer)
-	if err := encoder.Encode(Task{Tasktitle: task.Tasktitle, Taskdescription: task.Taskdescription, Taskstatus: task.Taskstatus, Taskdeadline: task.Taskdeadline}); err != nil {
-		fmt.Printf("Error encoding custom type: %v", err)
-	}
+	// Generate the hash key for the task
+	hashKey := fmt.Sprintf("task:%d", task.Taskid)
 
-	err := client.ZRem(ctx, "tasks", buffer.Bytes()).Err()
+	// Remove the task from the Hash and the Sorted Set using a pipeline
+	_, err := client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.HDel(ctx, "tasks", hashKey)        // Remove the task from the Hash
+		pipe.ZRem(ctx, "tasks:sorted", hashKey) // Remove the task from the Sorted Set
+		return nil
+	})
+
 	if err != nil {
-		fmt.Printf("encountered an error in removing: %v", task)
+		fmt.Printf("Encountered an error in removing the task: %v", task)
 	}
 }
 
 func AddTask(task Task) {
 	var buffer bytes.Buffer
 	encoder := gob.NewEncoder(&buffer)
-	if err := encoder.Encode(Task{Tasktitle: task.Tasktitle, Taskdescription: task.Taskdescription, Taskstatus: task.Taskstatus, Taskdeadline: task.Taskdeadline}); err != nil {
+	if err := encoder.Encode(task); err != nil {
 		fmt.Printf("Error encoding custom type: %v", err)
 	}
 
@@ -184,8 +188,14 @@ func AddTask(task Task) {
 		fmt.Println("Error parsing deadline:", err)
 	}
 
-	err = client.ZAdd(ctx, "tasks", redis.Z{Score: float64(dl.Unix()), Member: buffer.Bytes()}).Err()
+	// Using a pipeline to perform multiple operations
+	_, err = client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		hashKey := fmt.Sprintf("task:%d", task.Taskid)
+		pipe.HSet(ctx, "tasks", hashKey, buffer.Bytes())
+		pipe.ZAdd(ctx, "tasks:sorted", redis.Z{Score: float64(dl.Unix()), Member: hashKey})
+		return nil
+	})
 	if err != nil {
-		fmt.Println("Error adding task:", err)
+		fmt.Println("Error executing Redis pipeline:", err)
 	}
 }
